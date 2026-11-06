@@ -1,0 +1,28 @@
+[dataset]
+root = "data/kitti"
+camera = "image_2"
+
+[[dataset.windows]]
+sequence = "00"
+start_frame = 0
+frame_count = 300
+
+[[dataset.windows]]
+sequence = "07"
+start_frame = 600
+frame_count = 300
+
+[features]
+max_corners = 2000
+quality_level = 0.01
+min_distance = 7
+
+[geometry]
+ransac_threshold_px = 1.0
+min_correspondences = 8
+
+[filter]
+model = "data/models/yolo11n.pt"
+confidence = 0.25
+box_padding_px = 5
+classes = ["person", "bicycle", "car", "motorcycle", "bus", "truck"]
