@@ -43,6 +43,9 @@ def metrics(estimate: np.ndarray, reference: np.ndarray, valid: np.ndarray,
         raise ValueError("Common evaluation mask includes an invalid pose")
     aligned, scale = align_sim3(estimate, reference, common_valid)
     position_errors = np.linalg.norm(aligned[common_valid, :3, 3] - reference[common_valid, :3, 3], axis=1)
+    all_mask = np.ones(len(estimate), dtype=bool)
+    all_aligned, _ = align_sim3(estimate, reference, all_mask)
+    all_position_errors = np.linalg.norm(all_aligned[:, :3, 3] - reference[:, :3, 3], axis=1)
     translation_errors, rotation_errors = [], []
     for first in range(len(estimate) - interval):
         second = first + interval
@@ -64,6 +67,7 @@ def metrics(estimate: np.ndarray, reference: np.ndarray, valid: np.ndarray,
     detection_ms = np.array([row["detection_ms"] for row in records])
     output = {
         "ate_rmse_m": float(np.sqrt(np.mean(position_errors**2))),
+        "ate_all_frames_rmse_m": float(np.sqrt(np.mean(all_position_errors**2))),
         "rpe_interval_frames": interval,
         "rpe_pairs": len(translation_errors),
         "rpe_translation_mean_m": float(np.mean(translation_errors)) if translation_errors else None,
@@ -71,6 +75,7 @@ def metrics(estimate: np.ndarray, reference: np.ndarray, valid: np.ndarray,
         "sim3_scale": scale,
         "sim3_aligned_common_poses": int(np.count_nonzero(common_valid)),
         "pose_failures": int(np.count_nonzero(~valid[1:])),
+        "low_motion_degeneracy_frames": sum(row["low_motion_degeneracy"] for row in records),
         "pose_attempts": len(valid) - 1,
         "tracking_failure_rate": float(np.mean(~valid[1:])),
         "feature_inlier_ratio": inliers / submitted if submitted else None,

@@ -1,6 +1,6 @@
 # Robust Visual Odometry Under Dynamic Objects
 
-Compare monocular feature-based visual odometry with and without YOLO filtering of features on potentially moving objects. The first experiment uses a quieter window from KITTI odometry sequence 00 and a window with crossing traffic from sequence 07, left color camera (`image_2`), matching calibration, and ground truth poses.
+Compare monocular feature-based visual odometry using a baseline, hard YOLO box filtering, and selective flow-gated filtering. The experiment uses a quieter window from KITTI odometry sequence 00 and traffic windows from sequence 07, left color camera (`image_2`), matching calibration, and ground truth poses.
 
 ## Layout
 
@@ -22,7 +22,7 @@ The CUDA wheel command above is published by [PyTorch](https://pytorch.org/get-s
 
 ## KITTI data
 
-The official [KITTI odometry page](https://www.cvlibs.net/datasets/kitti/eval_odometry.php) describes the data and license. The downloader reads directly from KITTI's official S3 archives. It fetches only requested frames from the large color ZIP, plus the small calibration and pose ZIPs. The initial experiment uses frames 0-299 of sequence 00 and frames 600-899 of sequence 07.
+The official [KITTI odometry page](https://www.cvlibs.net/datasets/kitti/eval_odometry.php) describes the data and license. The downloader reads directly from KITTI's official S3 archives. It fetches only requested frames from the large color ZIP, plus the small calibration and pose ZIPs. The experiment uses frames 0-299 of sequence 00 and frames 600-899 of sequence 07, including a separate 800-899 analysis window.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\download_kitti.py --sequences 00 --frames 300
@@ -55,9 +55,9 @@ The 300-frame windows make iteration manageable. Additional local exploratory fr
 .\.venv\Scripts\python.exe -m rvo.run
 ```
 
-The runner uses the configured windows and writes per-frame records, estimated poses, metric summaries, and trajectory plots under `outputs/kitti_mvp/`. For a shorter development run, add `--limit 30`; for one sequence, add `--sequences 07`. Both variants use the same decoded frames and tracked correspondences before filtering.
+The runner uses the configured windows and writes per-frame records, estimated poses, metric summaries, and trajectory plots under `outputs/kitti_mvp/`. For a shorter development run, add `--limit 30`; for one sequence, add `--sequences 07`. All variants use the same decoded frames and tracked correspondences before filtering.
 
-The first paired run is summarized in `docs/initial_results.md` with trajectory plots and a feature-filtering example.
+The current results and failure analysis are summarized in `docs/initial_results.md` with trajectory plots and a feature-filtering example. To inspect flow and ground-truth motion at the failure frames, run `python scripts/diagnose_motion.py`; ground truth is used only for diagnosis and evaluation.
 
 To inspect which features are removed near crossing traffic:
 

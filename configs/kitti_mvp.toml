@@ -12,6 +12,11 @@ sequence = "07"
 start_frame = 600
 frame_count = 300
 
+[[dataset.windows]]
+sequence = "07"
+start_frame = 800
+frame_count = 100
+
 [features]
 max_corners = 2000
 quality_level = 0.01
@@ -26,3 +31,15 @@ model = "data/models/yolo11n.pt"
 confidence = 0.25
 box_padding_px = 5
 classes = ["person", "bicycle", "car", "motorcycle", "bus", "truck"]
+
+[selective]
+flow_difference_px = 3.0
+min_box_tracks = 8
+min_features = 100
+grid_rows = 4
+grid_cols = 4
+min_occupied_cells = 8
+
+[diagnostics]
+low_flow_px = 4.0
+min_ransac_inlier_ratio = 0.8

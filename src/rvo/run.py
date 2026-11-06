@@ -26,7 +26,7 @@ def save_plot(path: Path, reference: np.ndarray, aligned: dict[str, np.ndarray],
               valid: dict[str, np.ndarray], title: str) -> None:
     figure, axis = plt.subplots(figsize=(9, 6))
     axis.plot(reference[:, 0, 3], reference[:, 2, 3], label="Ground truth", color="black")
-    colors = {"baseline": "#1f77b4", "filtered": "#d62728"}
+    colors = {"baseline": "#1f77b4", "filtered": "#d62728", "selective": "#2ca02c"}
     for mode, poses in aligned.items():
         axis.plot(poses[:, 0, 3], poses[:, 2, 3], label=mode.title(), color=colors[mode])
         failures = ~valid[mode]
@@ -70,9 +70,10 @@ def main() -> None:
             raise ValueError(f"Missing ground truth for sequence {sequence}")
         summary = {"sequence": sequence, "start_frame": start, "frame_count": count,
                    "camera": config["dataset"]["camera"], "detector": config["filter"]["model"],
-                   "metrics": {}}
+                   "selective_settings": config["selective"],
+                   "diagnostic_settings": config["diagnostics"], "metrics": {}}
         aligned = {}
-        common_valid = valid["baseline"] & valid["filtered"]
+        common_valid = np.logical_and.reduce(list(valid.values()))
         summary["common_valid_poses"] = int(np.count_nonzero(common_valid))
         for mode in poses:
             mode_records = [row for row in records if row["mode"] == mode]

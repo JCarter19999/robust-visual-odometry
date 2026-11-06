@@ -68,6 +68,45 @@ def outside_boxes(points: np.ndarray, boxes: np.ndarray, padding: int) -> np.nda
     return keep
 
 
+def selective_keep(before: np.ndarray, after: np.ndarray, previous_boxes: np.ndarray,
+                   current_boxes: np.ndarray, padding: int, image_shape: tuple[int, int],
+                   settings: dict) -> tuple[np.ndarray, int, bool]:
+    """Reject a detected box only when its median flow differs from background."""
+    hard_keep = outside_boxes(before, previous_boxes, padding)
+    hard_keep &= outside_boxes(after, current_boxes, padding)
+    flow = after - before
+    background_points = flow[hard_keep] if np.count_nonzero(hard_keep) >= 50 else flow
+    if len(background_points) == 0:
+        return np.ones(len(before), dtype=bool), 0, True
+    background_flow = np.median(background_points, axis=0)
+    keep = np.ones(len(before), dtype=bool)
+    active_boxes = 0
+    for points, boxes in ((before, previous_boxes), (after, current_boxes)):
+        for left, top, right, bottom in boxes:
+            inside = ((points[:, 0] >= left - padding) & (points[:, 0] <= right + padding)
+                      & (points[:, 1] >= top - padding) & (points[:, 1] <= bottom + padding))
+            if np.count_nonzero(inside) < int(settings["min_box_tracks"]):
+                continue
+            difference = float(np.linalg.norm(np.median(flow[inside], axis=0) - background_flow))
+            if difference >= float(settings["flow_difference_px"]):
+                keep &= ~inside
+                active_boxes += 1
+    height, width = image_shape
+    selected = before[keep]
+    if len(selected):
+        columns = np.clip((selected[:, 0] * int(settings["grid_cols"]) / width).astype(int),
+                          0, int(settings["grid_cols"]) - 1)
+        rows = np.clip((selected[:, 1] * int(settings["grid_rows"]) / height).astype(int),
+                       0, int(settings["grid_rows"]) - 1)
+        occupied = len(np.unique(rows * int(settings["grid_cols"]) + columns))
+    else:
+        occupied = 0
+    fallback = len(selected) < int(settings["min_features"]) or occupied < int(settings["min_occupied_cells"])
+    if fallback:
+        keep[:] = True
+    return keep, active_boxes, fallback
+
+
 def estimate_step(before: np.ndarray, after: np.ndarray, K: np.ndarray,
                   prior_pose: np.ndarray, settings: dict) -> Step:
     start = perf_counter()
@@ -132,7 +171,8 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
     # Exclude model loading and the first CUDA warmup from measured frame times.
     model.predict(previous_color, device=0, conf=confidence, verbose=False)
     previous_boxes, previous_detection_ms = detect_boxes(model, previous_color, classes, confidence)
-    poses = {mode: [np.eye(4, dtype=np.float64)] for mode in ("baseline", "filtered")}
+    poses = {mode: [np.eye(4, dtype=np.float64)]
+             for mode in ("baseline", "filtered", "selective")}
     valid = {mode: [True] for mode in poses}
     records: list[dict] = []
 
@@ -156,24 +196,46 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
         keep &= outside_boxes(after, current_boxes, padding)
         filtering_ms = (perf_counter() - filtering_start) * 1000
         filtered_count = int(np.count_nonzero(~keep))
+        selective_start = perf_counter()
+        selective_mask, active_boxes, coverage_fallback = selective_keep(
+            before, after, previous_boxes, current_boxes, padding, current_gray.shape,
+            config["selective"]
+        )
+        selective_ms = (perf_counter() - selective_start) * 1000
+        selected_flow = np.linalg.norm(after[selective_mask] - before[selective_mask], axis=1)
+        median_selected_flow = float(np.median(selected_flow)) if len(selected_flow) else float("inf")
 
         for mode in poses:
-            points_before, points_after = (before, after) if mode == "baseline" else (before[keep], after[keep])
+            mask = {"baseline": None, "filtered": keep, "selective": selective_mask}[mode]
+            points_before, points_after = (before, after) if mask is None else (before[mask], after[mask])
             step = estimate_step(points_before, points_after, K, poses[mode][-1], config["geometry"])
+            inlier_ratio = step.ransac_inliers / step.submitted if step.submitted else 0.0
+            low_motion_degeneracy = (
+                mode == "selective" and not step.valid
+                and inlier_ratio >= float(config["diagnostics"]["min_ransac_inlier_ratio"])
+                and median_selected_flow <= float(config["diagnostics"]["low_flow_px"])
+            )
             poses[mode].append(step.pose)
             valid[mode].append(step.valid)
             total_ms = read_ms + tracking_ms + step.geometry_ms
             if mode == "filtered":
                 total_ms += detection_ms + filtering_ms
+            elif mode == "selective":
+                total_ms += detection_ms + selective_ms
             records.append({
                 "sequence": sequence, "frame": int(path.stem), "mode": mode,
                 "corners": corner_count, "tracked": len(before),
-                "removed": filtered_count if mode == "filtered" else 0,
+                "removed": 0 if mask is None else int(np.count_nonzero(~mask)),
+                "active_boxes": active_boxes if mode == "selective" else 0,
+                "coverage_fallback": int(coverage_fallback) if mode == "selective" else 0,
+                "median_selected_flow_px": median_selected_flow if mode == "selective" else 0.0,
+                "low_motion_degeneracy": int(low_motion_degeneracy),
                 "submitted": step.submitted, "ransac_inliers": step.ransac_inliers,
                 "pose_inliers": step.pose_inliers, "valid": int(step.valid),
                 "read_ms": read_ms, "tracking_ms": tracking_ms,
-                "detection_ms": detection_ms if mode == "filtered" else 0.0,
-                "filtering_ms": filtering_ms if mode == "filtered" else 0.0,
+                "detection_ms": detection_ms if mode != "baseline" else 0.0,
+                "filtering_ms": (filtering_ms if mode == "filtered" else
+                                 selective_ms if mode == "selective" else 0.0),
                 "geometry_ms": step.geometry_ms, "total_ms": total_ms,
             })
         previous_gray, previous_boxes = current_gray, current_boxes
