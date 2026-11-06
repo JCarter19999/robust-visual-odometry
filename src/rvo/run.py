@@ -27,7 +27,8 @@ def save_plot(path: Path, reference: np.ndarray, aligned: dict[str, np.ndarray],
     figure, axis = plt.subplots(figsize=(9, 6))
     axis.plot(reference[:, 0, 3], reference[:, 2, 3], label="Ground truth", color="black")
     colors = {"baseline": "#1f77b4", "filtered": "#d62728",
-              "selective": "#2ca02c", "instance_mask": "#9467bd"}
+              "selective": "#2ca02c", "instance_mask": "#9467bd",
+              "temporal": "#ff7f0e", "geometric": "#17becf", "stereo": "#8c564b"}
     for mode, poses in aligned.items():
         axis.plot(poses[:, 0, 3], poses[:, 2, 3], label=mode.title(), color=colors[mode])
         failures = ~valid[mode]
@@ -72,6 +73,9 @@ def main() -> None:
         summary = {"sequence": sequence, "start_frame": start, "frame_count": count,
                    "camera": config["dataset"]["camera"], "detector": config["filter"]["model"],
                    "selective_settings": config["selective"],
+                   "temporal_settings": config["temporal_filter"],
+                   "geometric_settings": config["geometric_filter"],
+                   "stereo_settings": config["stereo_filter"],
                    "diagnostic_settings": config["diagnostics"],
                    "mask_model": config["mask_filter"]["model"], "metrics": {}}
         aligned = {}

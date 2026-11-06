@@ -11,6 +11,8 @@ import numpy as np
 from ultralytics import YOLO
 
 from .kitti import projection_matrix
+from .motion_filters import (disparity_map, geometric_residual_keep,
+                             stereo_residual_keep, temporal_motion_keep)
 
 
 @dataclass
@@ -196,6 +198,14 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
     missing = [path for path in paths if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"Missing {len(missing)} frames; first: {missing[0]}")
+    right_dir = root / "sequences" / sequence / "image_3"
+    right_paths = [right_dir / f"{frame:06d}.png" for frame in range(start_frame, start_frame + frame_count)]
+    missing_right = [path for path in right_paths if not path.is_file()]
+    if missing_right:
+        raise FileNotFoundError(f"Stereo filtering needs {len(missing_right)} right-camera frames; run scripts/download_kitti.py --sequences {sequence} --start {start_frame} --frames {frame_count} --stereo")
+    P_left = projection_matrix(root, sequence, "image_2")
+    P_right = projection_matrix(root, sequence, "image_3")
+    stereo_baseline = abs(float(P_right[0, 3] / P_right[0, 0] - P_left[0, 3] / P_left[0, 0]))
     model_path = Path(config["filter"]["model"])
     if not model_path.is_file():
         raise FileNotFoundError(f"Detector weights missing: {model_path}; run scripts/prepare_model.py")
@@ -213,6 +223,8 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
     if previous_color is None:
         raise ValueError(f"Cannot read {paths[0]}")
     previous_gray = cv2.cvtColor(previous_color, cv2.COLOR_BGR2GRAY)
+    previous_right = cv2.imread(str(right_paths[0]), cv2.IMREAD_GRAYSCALE)
+    previous_disparity = disparity_map(previous_gray, previous_right, config["stereo_filter"])
     # Exclude model loading and the first CUDA warmup from measured frame times.
     model.predict(previous_color, device=0, conf=confidence, verbose=False)
     previous_boxes, previous_detection_ms = detect_boxes(model, previous_color, classes, confidence)
@@ -220,10 +232,11 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
     previous_instance_mask, previous_mask_ms = detect_instance_mask(
         mask_model, previous_color, classes, mask_confidence
     )
-    poses = {mode: [np.eye(4, dtype=np.float64)] for mode in
-             ("baseline", "filtered", "selective", "instance_mask")}
+    modes = ("baseline", "filtered", "selective", "instance_mask", "temporal", "geometric", "stereo")
+    poses = {mode: [np.eye(4, dtype=np.float64)] for mode in modes}
     valid = {mode: [True] for mode in poses}
     records: list[dict] = []
+    temporal_state: dict = {"objects": {}, "next_id": 0}
 
     for pair_number, path in enumerate(paths[1:], 1):
         read_start = perf_counter()
@@ -232,6 +245,12 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
             raise ValueError(f"Cannot read {path}")
         current_gray = cv2.cvtColor(current_color, cv2.COLOR_BGR2GRAY)
         read_ms = (perf_counter() - read_start) * 1000
+        stereo_start = perf_counter()
+        current_right = cv2.imread(str(right_paths[pair_number]), cv2.IMREAD_GRAYSCALE)
+        if current_right is None:
+            raise ValueError(f"Cannot read {right_paths[pair_number]}")
+        current_disparity = disparity_map(current_gray, current_right, config["stereo_filter"])
+        stereo_ms = (perf_counter() - stereo_start) * 1000
 
         tracking_start = perf_counter()
         before, after, corner_count = detect_and_track(previous_gray, current_gray,
@@ -259,12 +278,28 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
         mask_keep = outside_masks(before, after, previous_instance_mask,
                                   current_instance_mask, padding)
         mask_filter_ms = (perf_counter() - mask_filter_start) * 1000
+        temporal_start = perf_counter()
+        temporal_keep, temporal_state, temporal_active = temporal_motion_keep(
+            before, after, previous_boxes, current_boxes, temporal_state,
+            config["temporal_filter"], padding)
+        temporal_ms = (perf_counter() - temporal_start) * 1000
+        geometric_start = perf_counter()
+        geometric_keep, geometric_removed = geometric_residual_keep(
+            before, after, previous_boxes, current_boxes, K, config["geometric_filter"], padding)
+        geometric_ms = (perf_counter() - geometric_start) * 1000
+        stereo_filter_start = perf_counter()
+        stereo_keep, stereo_removed = stereo_residual_keep(
+            before, after, previous_boxes, current_boxes, previous_disparity, K,
+            stereo_baseline, config["stereo_filter"], padding)
+        stereo_filter_ms = (perf_counter() - stereo_filter_start) * 1000
         selected_flow = np.linalg.norm(after[selective_mask] - before[selective_mask], axis=1)
         median_selected_flow = float(np.median(selected_flow)) if len(selected_flow) else float("inf")
 
         for mode in poses:
             feature_mask = {"baseline": None, "filtered": keep,
-                            "selective": selective_mask, "instance_mask": mask_keep}[mode]
+                            "selective": selective_mask, "instance_mask": mask_keep,
+                            "temporal": temporal_keep, "geometric": geometric_keep,
+                            "stereo": stereo_keep}[mode]
             points_before, points_after = ((before, after) if feature_mask is None
                                            else (before[feature_mask], after[feature_mask]))
             step = estimate_step(points_before, points_after, K, poses[mode][-1], config["geometry"])
@@ -283,25 +318,39 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
                 total_ms += detection_ms + selective_ms
             elif mode == "instance_mask":
                 total_ms += mask_inference_ms + mask_filter_ms
+            elif mode == "temporal":
+                total_ms += detection_ms + temporal_ms
+            elif mode == "geometric":
+                total_ms += detection_ms + geometric_ms
+            elif mode == "stereo":
+                total_ms += detection_ms + stereo_ms + stereo_filter_ms
             records.append({
                 "sequence": sequence, "frame": int(path.stem), "mode": mode,
                 "corners": corner_count, "tracked": len(before),
                 "removed": 0 if feature_mask is None else int(np.count_nonzero(~feature_mask)),
                 "active_boxes": active_boxes if mode == "selective" else 0,
+                "temporal_active_objects": temporal_active if mode == "temporal" else 0,
+                "geometric_removed": geometric_removed if mode == "geometric" else 0,
+                "stereo_removed": stereo_removed if mode == "stereo" else 0,
                 "coverage_fallback": int(coverage_fallback) if mode == "selective" else 0,
                 "median_selected_flow_px": median_selected_flow if mode == "selective" else 0.0,
                 "low_motion_degeneracy": int(low_motion_degeneracy),
                 "mask_inference_ms": mask_inference_ms if mode == "instance_mask" else 0.0,
+                "stereo_ms": stereo_ms if mode == "stereo" else 0.0,
                 "submitted": step.submitted, "ransac_inliers": step.ransac_inliers,
                 "pose_inliers": step.pose_inliers, "valid": int(step.valid),
                 "read_ms": read_ms, "tracking_ms": tracking_ms,
-                "detection_ms": detection_ms if mode in ("filtered", "selective") else 0.0,
+                "detection_ms": detection_ms if mode in ("filtered", "selective", "temporal", "geometric", "stereo") else 0.0,
                 "filtering_ms": (filtering_ms if mode == "filtered" else
                                  selective_ms if mode == "selective" else
-                                 mask_filter_ms if mode == "instance_mask" else 0.0),
+                                 mask_filter_ms if mode == "instance_mask" else
+                                 temporal_ms if mode == "temporal" else
+                                 geometric_ms if mode == "geometric" else
+                                 stereo_filter_ms if mode == "stereo" else 0.0),
                 "geometry_ms": step.geometry_ms, "total_ms": total_ms,
             })
         previous_gray, previous_boxes = current_gray, current_boxes
+        previous_disparity = current_disparity
         previous_instance_mask, previous_mask_ms = current_instance_mask, current_mask_ms
 
     return records, {key: np.stack(value) for key, value in poses.items()}, {

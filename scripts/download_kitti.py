@@ -188,6 +188,7 @@ def main() -> None:
     parser.add_argument("--sequences", nargs="+", default=["00"])
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--frames", type=int, default=300)
+    parser.add_argument("--stereo", action="store_true", help="Also download matching right-camera image_3 frames")
     args = parser.parse_args()
     if args.start < 0 or args.frames < 1:
         parser.error("--start must be >= 0 and --frames must be >= 1")
@@ -206,17 +207,19 @@ def main() -> None:
                 print(f"Sequence {sequence}: frames {args.start}-{args.start + args.frames - 1}", flush=True)
                 jobs = []
                 for frame in range(args.start, args.start + args.frames):
-                    relative = f"sequences/{sequence}/image_2/{frame:06d}.png"
-                    if relative not in entries:
-                        raise KeyError(f"Missing {relative} in KITTI color archive")
-                    jobs.append((entries[relative], root / relative))
+                    cameras = ("image_2", "image_3") if args.stereo else ("image_2",)
+                    for camera in cameras:
+                        relative = f"sequences/{sequence}/{camera}/{frame:06d}.png"
+                        if relative not in entries:
+                            raise KeyError(f"Missing {relative} in KITTI color archive")
+                        jobs.append((entries[relative], root / relative))
                 with ThreadPoolExecutor(max_workers=6) as pool:
                     futures = [pool.submit(extract_remote_member, COLOR_URL, remote.size, info, path)
                                for info, path in jobs]
                     for count, future in enumerate(as_completed(futures), 1):
                         future.result()
-                        if count % 50 == 0 or count == args.frames:
-                            print(f"  {count}/{args.frames}", flush=True)
+                        if count % 50 == 0 or count == len(jobs):
+                            print(f"  {count}/{len(jobs)}", flush=True)
 
     inventory = {}
     for sequence_dir in sorted((root / "sequences").glob("[0-9][0-9]")):
@@ -231,6 +234,7 @@ def main() -> None:
         "source": "KITTI odometry, official avg-kitti S3 archives",
         "urls": {"color": COLOR_URL, "calibration": CALIB_URL, "poses": POSES_URL},
         "camera": "image_2",
+        "stereo": bool(args.stereo),
         "local_inventory": inventory,
         "last_request": {"sequences": sequences, "start_frame": args.start,
                          "frame_count": args.frames},

@@ -1,6 +1,6 @@
 # Robust Visual Odometry Under Dynamic Objects
 
-Compare monocular feature-based visual odometry using a baseline, hard YOLO box filtering, selective flow-gated filtering, and YOLO instance-mask filtering. The experiment uses a quieter window from KITTI odometry sequence 00 and traffic windows from sequence 07, left color camera (`image_2`), matching calibration, and ground truth poses.
+Compare feature-based visual odometry using a baseline, semantic filters, temporal motion checks, epipolar residuals, and stereo reprojection residuals. Experiments use KITTI odometry sequence 00 and traffic windows from sequence 07, with left-camera tracking and right-camera depth for the stereo variant.
 
 ## Layout
 
@@ -32,7 +32,7 @@ The official [KITTI odometry page](https://www.cvlibs.net/datasets/kitti/eval_od
 .\.venv\Scripts\python.exe scripts\prepare_model.py
 ```
 
-The downloader is resumable: existing frames are skipped. Rerun with a larger `--frames` value to extend a sequence, or `--start` for a later contiguous window. Downloaded data stays under `data/` and is not committed.
+The downloader is resumable: existing frames are skipped. Rerun with a larger `--frames` value to extend a sequence, or `--start` for a later contiguous window. Add `--stereo` to fetch matching `image_3` frames for stereo filtering. Downloaded data stays under `data/` and is not committed.
 
 ```
 data/kitti/
@@ -45,7 +45,7 @@ KITTI sequences 00-10 include ground truth; sequences 11-21 do not. Use camera `
 
 ## First experiment
 
-Settings live in `configs/kitti_mvp.toml`; the comparison rules and metric definitions are in `docs/experiment_protocol.md`. The baseline, hard-box, selective-flow, and instance-mask variants share tracking, RANSAC, and pose settings. Outputs include ATE, translation and rotation RPE, failure rate, processing time, trajectories, and annotated frames.
+Settings live in `configs/kitti_mvp.toml`; the comparison rules and metric definitions are in `docs/experiment_protocol.md`. The runner compares baseline, hard-box, selective-flow, instance-mask, temporal-motion, geometric-residual, and stereo-residual variants. Stereo filtering requires matching right-camera `image_3` frames; use `scripts/download_kitti.py --sequences 00 --frames 300 --stereo` and `scripts/download_kitti.py --sequences 07 --start 600 --frames 300 --stereo` for the configured windows. Outputs include ATE, translation and rotation RPE, failure rate, processing time, and trajectories.
 
 The 300-frame windows make iteration manageable. Additional local exploratory frames from sequences 01 and 05 are present on this machine; they are outside the first experiment. Record exact frame ranges with every result.
 
