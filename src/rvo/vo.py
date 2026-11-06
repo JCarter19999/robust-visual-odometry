@@ -59,6 +59,46 @@ def detect_boxes(model: YOLO, frame: np.ndarray, classes: set[str], confidence: 
     return boxes.xyxy.cpu().numpy()[selected], elapsed_ms
 
 
+def detect_instance_mask(model: YOLO, frame: np.ndarray, classes: set[str],
+                         confidence: float) -> tuple[np.ndarray, float]:
+    start = perf_counter()
+    result = model.predict(frame, device=0, conf=confidence, verbose=False)[0]
+    elapsed_ms = (perf_counter() - start) * 1000
+    height, width = frame.shape[:2]
+    combined = np.zeros((height, width), dtype=bool)
+    if result.masks is None or result.boxes is None or len(result.boxes) == 0:
+        return combined, elapsed_ms
+    categories = result.boxes.cls.cpu().numpy().astype(int)
+    selected = [i for i, class_id in enumerate(categories) if result.names[class_id] in classes]
+    if not selected:
+        return combined, elapsed_ms
+    masks = result.masks.data[selected].cpu().numpy()
+    for mask in masks:
+        if mask.shape != (height, width):
+            mask = cv2.resize(mask.astype(np.float32), (width, height),
+                              interpolation=cv2.INTER_NEAREST)
+        combined |= mask >= 0.5
+    return combined, elapsed_ms
+
+
+def outside_masks(before: np.ndarray, after: np.ndarray, previous_mask: np.ndarray,
+                  current_mask: np.ndarray, padding: int) -> np.ndarray:
+    if not len(before):
+        return np.zeros(0, dtype=bool)
+    height, width = previous_mask.shape
+    coords0 = np.rint(before).astype(int)
+    coords1 = np.rint(after).astype(int)
+    coords0[:, 0] = np.clip(coords0[:, 0], 0, width - 1)
+    coords0[:, 1] = np.clip(coords0[:, 1], 0, height - 1)
+    coords1[:, 0] = np.clip(coords1[:, 0], 0, width - 1)
+    coords1[:, 1] = np.clip(coords1[:, 1], 0, height - 1)
+    if padding > 0:
+        kernel = np.ones((padding * 2 + 1, padding * 2 + 1), np.uint8)
+        previous_mask = cv2.dilate(previous_mask.astype(np.uint8), kernel).astype(bool)
+        current_mask = cv2.dilate(current_mask.astype(np.uint8), kernel).astype(bool)
+    return ~previous_mask[coords0[:, 1], coords0[:, 0]] & ~current_mask[coords1[:, 1], coords1[:, 0]]
+
+
 def outside_boxes(points: np.ndarray, boxes: np.ndarray, padding: int) -> np.ndarray:
     keep = np.ones(len(points), dtype=bool)
     for left, top, right, bottom in boxes:
@@ -160,8 +200,13 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
     if not model_path.is_file():
         raise FileNotFoundError(f"Detector weights missing: {model_path}; run scripts/prepare_model.py")
     model = YOLO(str(model_path))
+    mask_model_path = Path(config["mask_filter"]["model"])
+    if not mask_model_path.is_file():
+        raise FileNotFoundError(f"Instance segmentation weights missing: {mask_model_path}; run scripts/prepare_model.py")
+    mask_model = YOLO(str(mask_model_path))
     classes = set(config["filter"]["classes"])
     confidence = float(config["filter"]["confidence"])
+    mask_confidence = float(config["mask_filter"]["confidence"])
     padding = int(config["filter"]["box_padding_px"])
 
     previous_color = cv2.imread(str(paths[0]), cv2.IMREAD_COLOR)
@@ -171,8 +216,12 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
     # Exclude model loading and the first CUDA warmup from measured frame times.
     model.predict(previous_color, device=0, conf=confidence, verbose=False)
     previous_boxes, previous_detection_ms = detect_boxes(model, previous_color, classes, confidence)
-    poses = {mode: [np.eye(4, dtype=np.float64)]
-             for mode in ("baseline", "filtered", "selective")}
+    mask_model.predict(previous_color, device=0, conf=mask_confidence, verbose=False)
+    previous_instance_mask, previous_mask_ms = detect_instance_mask(
+        mask_model, previous_color, classes, mask_confidence
+    )
+    poses = {mode: [np.eye(4, dtype=np.float64)] for mode in
+             ("baseline", "filtered", "selective", "instance_mask")}
     valid = {mode: [True] for mode in poses}
     records: list[dict] = []
 
@@ -202,12 +251,22 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
             config["selective"]
         )
         selective_ms = (perf_counter() - selective_start) * 1000
+        current_instance_mask, current_mask_ms = detect_instance_mask(
+            mask_model, current_color, classes, mask_confidence
+        )
+        mask_inference_ms = current_mask_ms + (previous_mask_ms if pair_number == 1 else 0.0)
+        mask_filter_start = perf_counter()
+        mask_keep = outside_masks(before, after, previous_instance_mask,
+                                  current_instance_mask, padding)
+        mask_filter_ms = (perf_counter() - mask_filter_start) * 1000
         selected_flow = np.linalg.norm(after[selective_mask] - before[selective_mask], axis=1)
         median_selected_flow = float(np.median(selected_flow)) if len(selected_flow) else float("inf")
 
         for mode in poses:
-            mask = {"baseline": None, "filtered": keep, "selective": selective_mask}[mode]
-            points_before, points_after = (before, after) if mask is None else (before[mask], after[mask])
+            feature_mask = {"baseline": None, "filtered": keep,
+                            "selective": selective_mask, "instance_mask": mask_keep}[mode]
+            points_before, points_after = ((before, after) if feature_mask is None
+                                           else (before[feature_mask], after[feature_mask]))
             step = estimate_step(points_before, points_after, K, poses[mode][-1], config["geometry"])
             inlier_ratio = step.ransac_inliers / step.submitted if step.submitted else 0.0
             low_motion_degeneracy = (
@@ -222,23 +281,28 @@ def run_window(root: Path, sequence: str, start_frame: int, frame_count: int,
                 total_ms += detection_ms + filtering_ms
             elif mode == "selective":
                 total_ms += detection_ms + selective_ms
+            elif mode == "instance_mask":
+                total_ms += mask_inference_ms + mask_filter_ms
             records.append({
                 "sequence": sequence, "frame": int(path.stem), "mode": mode,
                 "corners": corner_count, "tracked": len(before),
-                "removed": 0 if mask is None else int(np.count_nonzero(~mask)),
+                "removed": 0 if feature_mask is None else int(np.count_nonzero(~feature_mask)),
                 "active_boxes": active_boxes if mode == "selective" else 0,
                 "coverage_fallback": int(coverage_fallback) if mode == "selective" else 0,
                 "median_selected_flow_px": median_selected_flow if mode == "selective" else 0.0,
                 "low_motion_degeneracy": int(low_motion_degeneracy),
+                "mask_inference_ms": mask_inference_ms if mode == "instance_mask" else 0.0,
                 "submitted": step.submitted, "ransac_inliers": step.ransac_inliers,
                 "pose_inliers": step.pose_inliers, "valid": int(step.valid),
                 "read_ms": read_ms, "tracking_ms": tracking_ms,
-                "detection_ms": detection_ms if mode != "baseline" else 0.0,
+                "detection_ms": detection_ms if mode in ("filtered", "selective") else 0.0,
                 "filtering_ms": (filtering_ms if mode == "filtered" else
-                                 selective_ms if mode == "selective" else 0.0),
+                                 selective_ms if mode == "selective" else
+                                 mask_filter_ms if mode == "instance_mask" else 0.0),
                 "geometry_ms": step.geometry_ms, "total_ms": total_ms,
             })
         previous_gray, previous_boxes = current_gray, current_boxes
+        previous_instance_mask, previous_mask_ms = current_instance_mask, current_mask_ms
 
     return records, {key: np.stack(value) for key, value in poses.items()}, {
         key: np.asarray(value, dtype=bool) for key, value in valid.items()

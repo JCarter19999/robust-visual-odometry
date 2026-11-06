@@ -1,6 +1,6 @@
 # Robust Visual Odometry Under Dynamic Objects
 
-Compare monocular feature-based visual odometry using a baseline, hard YOLO box filtering, and selective flow-gated filtering. The experiment uses a quieter window from KITTI odometry sequence 00 and traffic windows from sequence 07, left color camera (`image_2`), matching calibration, and ground truth poses.
+Compare monocular feature-based visual odometry using a baseline, hard YOLO box filtering, selective flow-gated filtering, and YOLO instance-mask filtering. The experiment uses a quieter window from KITTI odometry sequence 00 and traffic windows from sequence 07, left color camera (`image_2`), matching calibration, and ground truth poses.
 
 ## Layout
 
@@ -45,7 +45,7 @@ KITTI sequences 00-10 include ground truth; sequences 11-21 do not. Use camera `
 
 ## First experiment
 
-Settings live in `configs/kitti_mvp.toml`; the comparison rules and metric definitions are in `docs/experiment_protocol.md`. Both variants will share detection, tracking, RANSAC, and pose settings. The filtered variant will remove tracks intersecting YOLO boxes for potentially moving classes. Planned outputs: ATE, translation and rotation RPE, inlier ratio, failure rate, processing time, trajectories, and annotated frames.
+Settings live in `configs/kitti_mvp.toml`; the comparison rules and metric definitions are in `docs/experiment_protocol.md`. The baseline, hard-box, selective-flow, and instance-mask variants share tracking, RANSAC, and pose settings. Outputs include ATE, translation and rotation RPE, failure rate, processing time, trajectories, and annotated frames.
 
 The 300-frame windows make iteration manageable. Additional local exploratory frames from sequences 01 and 05 are present on this machine; they are outside the first experiment. Record exact frame ranges with every result.
 
@@ -58,6 +58,8 @@ The 300-frame windows make iteration manageable. Additional local exploratory fr
 The runner uses the configured windows and writes per-frame records, estimated poses, metric summaries, and trajectory plots under `outputs/kitti_mvp/`. For a shorter development run, add `--limit 30`; for one sequence, add `--sequences 07`. All variants use the same decoded frames and tracked correspondences before filtering.
 
 The current results and failure analysis are summarized in `docs/initial_results.md` with trajectory plots and a feature-filtering example. To inspect flow and ground-truth motion at the failure frames, run `python scripts/diagnose_motion.py`; ground truth is used only for diagnosis and evaluation.
+
+The instance-mask variant uses `yolo11n-seg.pt` and excludes a feature if either endpoint falls inside a padded object mask. Run `scripts/prepare_model.py` to fetch both detection and segmentation weights before running the comparison.
 
 To inspect which features are removed near crossing traffic:
 

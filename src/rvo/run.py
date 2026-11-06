@@ -26,7 +26,8 @@ def save_plot(path: Path, reference: np.ndarray, aligned: dict[str, np.ndarray],
               valid: dict[str, np.ndarray], title: str) -> None:
     figure, axis = plt.subplots(figsize=(9, 6))
     axis.plot(reference[:, 0, 3], reference[:, 2, 3], label="Ground truth", color="black")
-    colors = {"baseline": "#1f77b4", "filtered": "#d62728", "selective": "#2ca02c"}
+    colors = {"baseline": "#1f77b4", "filtered": "#d62728",
+              "selective": "#2ca02c", "instance_mask": "#9467bd"}
     for mode, poses in aligned.items():
         axis.plot(poses[:, 0, 3], poses[:, 2, 3], label=mode.title(), color=colors[mode])
         failures = ~valid[mode]
@@ -71,7 +72,8 @@ def main() -> None:
         summary = {"sequence": sequence, "start_frame": start, "frame_count": count,
                    "camera": config["dataset"]["camera"], "detector": config["filter"]["model"],
                    "selective_settings": config["selective"],
-                   "diagnostic_settings": config["diagnostics"], "metrics": {}}
+                   "diagnostic_settings": config["diagnostics"],
+                   "mask_model": config["mask_filter"]["model"], "metrics": {}}
         aligned = {}
         common_valid = np.logical_and.reduce(list(valid.values()))
         summary["common_valid_poses"] = int(np.count_nonzero(common_valid))
